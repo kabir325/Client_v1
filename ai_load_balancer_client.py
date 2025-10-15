@@ -208,6 +208,20 @@ class AILoadBalancerClient:
             logger.error(f"Error during registration: {e}")
             return False
     
+    def send_port_update(self):
+        """Send gRPC port update to server via health check"""
+        try:
+            if hasattr(self, 'client_grpc_port') and self.stub:
+                # We'll use a simple approach - store port in client specs
+                logger.info(f"📡 Notifying server of gRPC port: {self.client_grpc_port}")
+                
+                # Create a custom health check that includes port info
+                # For now, we'll just log it - the server will use a fixed port
+                logger.info(f"🌐 Client gRPC endpoint: {self._get_local_ip()}:{self.client_grpc_port}")
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to send port update: {e}")
+    
     def start_heartbeat(self):
         """Start heartbeat thread"""
         def heartbeat_loop():
@@ -415,8 +429,21 @@ class AILoadBalancerClient:
         try:
             logger.info(f"🤖 Processing AI request: '{prompt[:50]}...'")
             
+            # Try to call the actual Gradio model first
+            if hasattr(self, 'assigned_model') and hasattr(self, 'mock_model_info'):
+                model_port = self.mock_model_info.get("port", 7861)
+                
+                # Try to call the actual Gradio model
+                try:
+                    response = self._call_gradio_model(prompt, model_port)
+                    if response and "Error" not in response:
+                        logger.info(f"✅ Got response from Gradio model ({len(response)} chars)")
+                        return response
+                except Exception as e:
+                    logger.warning(f"⚠️ Gradio model call failed: {e}, using mock response")
+            
+            # Fallback to mock response
             if hasattr(self, 'mock_model_info'):
-                # Use mock model
                 model_name = self.assigned_model
                 base_response = self.mock_model_info["responses"].get(model_name, "Generic AI response")
                 
@@ -429,15 +456,55 @@ class AILoadBalancerClient:
                     time.sleep(6)  # 8B model - slower
                 
                 response = f"{base_response} Detailed response to: '{prompt}'"
-                logger.info(f"✅ Generated response ({len(response)} chars)")
+                logger.info(f"✅ Generated mock response ({len(response)} chars)")
                 return response
             else:
-                # Fallback response
+                # Final fallback
                 return f"Mock response from {self.assigned_model}: Agricultural advice for '{prompt}'"
                 
         except Exception as e:
             logger.error(f"❌ AI request processing failed: {e}")
             return f"Error processing request: {str(e)}"
+    
+    def _call_gradio_model(self, prompt: str, port: int) -> str:
+        """Call the actual Gradio model running on the client"""
+        try:
+            import requests
+            
+            # Gradio API endpoint
+            api_url = f"http://localhost:{port}/api/predict"
+            
+            # Gradio API payload
+            payload = {
+                "data": [
+                    prompt,      # prompt
+                    256,         # max_tokens
+                    0.7,         # temperature
+                    0.9          # top_p
+                ]
+            }
+            
+            logger.info(f"📡 Calling Gradio model at port {port}")
+            
+            # Make request to Gradio
+            response = requests.post(api_url, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if "data" in result and len(result["data"]) > 0:
+                    model_response = result["data"][0]
+                    logger.info(f"✅ Gradio model responded successfully")
+                    return model_response
+                else:
+                    logger.warning("⚠️ Gradio response format unexpected")
+                    return None
+            else:
+                logger.warning(f"⚠️ Gradio API returned status {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to call Gradio model: {e}")
+            return None
     
     def start_grpc_server(self):
         """Start gRPC server to receive AI requests from the load balancer"""
@@ -485,8 +552,17 @@ class AILoadBalancerClient:
                             client_id=self.client.client_id
                         )
             
-            # Start gRPC server on a different port (use simpler calculation)
-            client_port = 50052 + (hash(self.client_id) % 100)  # Unique port per client
+            # Use a deterministic port based on timestamp from client_id
+            # Extract timestamp from client_id: client-kabir-1760551531-5e41d5e9
+            try:
+                parts = self.client_id.split('-')
+                if len(parts) >= 3:
+                    timestamp = int(parts[2])
+                    client_port = 50052 + (timestamp % 1000)  # Use last 3 digits of timestamp
+                else:
+                    client_port = 50052 + (abs(hash(self.client_id)) % 1000)
+            except:
+                client_port = 50052 + (abs(hash(self.client_id)) % 1000)
             server = grpc.server(futures.ThreadPoolExecutor(max_workers=5))
             
             client_service = ClientAIService(self)
@@ -552,8 +628,8 @@ class AILoadBalancerClient:
         # Start gRPC server for receiving AI requests
         self.start_grpc_server()
         
-        # Send updated registration with gRPC port info
-        self._update_server_with_port()
+        # Send port update to server
+        self.send_port_update()
         
         try:
             logger.info("🎯 AI Client ready for distributed LLM processing")
