@@ -1,0 +1,19 @@
+# AI Load Balancer Client v1.0 Requirements
+
+# Core gRPC
+grpcio==1.60.0
+grpcio-tools==1.60.0
+
+# System monitoring
+psutil==5.9.6
+
+# For LLM models (optional - only if using real models)
+# torch>=2.0.0
+# transformers>=4.30.0
+# accelerate>=0.20.0
+# safetensors>=0.3.0
+# gradio>=3.35.0
+# bitsandbytes>=0.41.0
+
+# Utilities
+python-dateutil==2.8.2
