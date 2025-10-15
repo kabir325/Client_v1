@@ -140,12 +140,21 @@ class AILoadBalancerClient:
     def _get_local_ip(self) -> str:
         """Get local IP address"""
         try:
-            # Connect to a remote address to determine local IP
+            # First try to connect to the server to get the right interface
+            server_ip = self.server_address.split(':')[0]
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.connect(("8.8.8.8", 80))
-                return s.getsockname()[0]
+                s.connect((server_ip, 80))
+                local_ip = s.getsockname()[0]
+                logger.info(f"🌐 Detected local IP: {local_ip}")
+                return local_ip
         except:
-            return "127.0.0.1"
+            try:
+                # Fallback to Google DNS
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect(("8.8.8.8", 80))
+                    return s.getsockname()[0]
+            except:
+                return "127.0.0.1"
     
     def connect(self) -> bool:
         """Connect to the AI load balancer server"""
@@ -308,6 +317,17 @@ class AILoadBalancerClient:
         try:
             logger.info(f"🎭 Starting mock {model_name} server on port {port}...")
             
+            # Store model info for AI request processing
+            self.mock_model_info = {
+                "name": model_name,
+                "port": port,
+                "responses": {
+                    "dhenu2-llama3.2-1b": "🌱 Quick agricultural advice: This is a basic response from the 1B model focusing on simple, practical farming tips.",
+                    "dhenu2-llama3.2-3b": "🌾 Detailed agricultural analysis: This is a comprehensive response from the 3B model providing in-depth farming strategies and scientific insights.",
+                    "dhenu2-llama3.1-8b": "🔬 Expert agricultural consultation: This is an advanced response from the 8B model offering research-level analysis, policy considerations, and cutting-edge agricultural techniques."
+                }
+            }
+            
             # Create a simple HTTP server that responds to requests
             def run_mock_server():
                 try:
@@ -353,7 +373,9 @@ class AILoadBalancerClient:
                             except:
                                 prompt = "sample prompt"
                             
-                            response = f"[DEMO] Mock response from {model_name}: This is a simulated agricultural AI response to your prompt: '{prompt}'. In a real deployment, this would be processed by the actual LLM model."
+                            # Generate model-specific response
+                            base_response = self.mock_model_info["responses"].get(model_name, "Generic response")
+                            response = f"{base_response} Responding to: '{prompt}'"
                             
                             html = f"""
                             <html>
@@ -388,6 +410,113 @@ class AILoadBalancerClient:
         except Exception as e:
             logger.error(f"❌ Failed to start mock server: {e}")
     
+    def process_ai_request(self, prompt: str) -> str:
+        """Process an AI request using the assigned model"""
+        try:
+            logger.info(f"🤖 Processing AI request: '{prompt[:50]}...'")
+            
+            if hasattr(self, 'mock_model_info'):
+                # Use mock model
+                model_name = self.assigned_model
+                base_response = self.mock_model_info["responses"].get(model_name, "Generic AI response")
+                
+                # Simulate processing time based on model size
+                if "1b" in model_name.lower():
+                    time.sleep(2)  # 1B model - fast
+                elif "3b" in model_name.lower():
+                    time.sleep(4)  # 3B model - medium
+                elif "8b" in model_name.lower():
+                    time.sleep(6)  # 8B model - slower
+                
+                response = f"{base_response} Detailed response to: '{prompt}'"
+                logger.info(f"✅ Generated response ({len(response)} chars)")
+                return response
+            else:
+                # Fallback response
+                return f"Mock response from {self.assigned_model}: Agricultural advice for '{prompt}'"
+                
+        except Exception as e:
+            logger.error(f"❌ AI request processing failed: {e}")
+            return f"Error processing request: {str(e)}"
+    
+    def start_grpc_server(self):
+        """Start gRPC server to receive AI requests from the load balancer"""
+        try:
+            from concurrent import futures
+            
+            # Create client service handler
+            class ClientAIService(load_balancer_pb2_grpc.LoadBalancerServicer):
+                def __init__(self, client_instance):
+                    self.client = client_instance
+                
+                def ProcessAIRequest(self, request, context):
+                    """Handle AI request from the server"""
+                    try:
+                        logger.info(f"📥 Received AI request: {request.request_id}")
+                        logger.info(f"🎯 Model: {request.model_name}")
+                        logger.info(f"📝 Prompt: {request.prompt[:50]}...")
+                        
+                        start_time = time.time()
+                        
+                        # Process the request
+                        response_text = self.client.process_ai_request(request.prompt)
+                        
+                        processing_time = time.time() - start_time
+                        
+                        logger.info(f"✅ Processed request {request.request_id} in {processing_time:.2f}s")
+                        
+                        return load_balancer_pb2.AIResponse(
+                            request_id=request.request_id,
+                            success=True,
+                            response_text=response_text,
+                            processing_time=processing_time,
+                            model_used=request.model_name,
+                            client_id=self.client.client_id
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Failed to process AI request: {e}")
+                        return load_balancer_pb2.AIResponse(
+                            request_id=request.request_id,
+                            success=False,
+                            response_text=f"Error: {str(e)}",
+                            processing_time=0.0,
+                            model_used=request.model_name,
+                            client_id=self.client.client_id
+                        )
+            
+            # Start gRPC server on a different port (use simpler calculation)
+            client_port = 50052 + (hash(self.client_id) % 100)  # Unique port per client
+            server = grpc.server(futures.ThreadPoolExecutor(max_workers=5))
+            
+            client_service = ClientAIService(self)
+            load_balancer_pb2_grpc.add_LoadBalancerServicer_to_server(client_service, server)
+            
+            listen_addr = f'0.0.0.0:{client_port}'
+            server.add_insecure_port(listen_addr)
+            server.start()
+            
+            self.client_grpc_server = server
+            self.client_grpc_port = client_port
+            
+            logger.info(f"🌐 Client gRPC server started on {listen_addr}")
+            logger.info(f"📡 Server should connect to: {self._get_local_ip()}:{client_port}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to start client gRPC server: {e}")
+    
+    def _update_server_with_port(self):
+        """Update server with client gRPC port information"""
+        try:
+            if hasattr(self, 'client_grpc_port'):
+                # Store port info in a way the server can access
+                # We'll use the client_id as a key and store port info
+                logger.info(f"📡 Client gRPC port: {self.client_grpc_port}")
+                logger.info(f"🌐 Client IP: {self._get_local_ip()}")
+                logger.info(f"🔗 Full address: {self._get_local_ip()}:{self.client_grpc_port}")
+        except Exception as e:
+            logger.error(f"❌ Failed to update server with port info: {e}")
+    
     def run(self):
         """Main client run loop"""
         logger.info(f"🚀 Starting AI Load Balancer Client {self.client_id}")
@@ -420,6 +549,12 @@ class AILoadBalancerClient:
         # Check for LLM model assignment
         self.check_llm_assignment()
         
+        # Start gRPC server for receiving AI requests
+        self.start_grpc_server()
+        
+        # Send updated registration with gRPC port info
+        self._update_server_with_port()
+        
         try:
             logger.info("🎯 AI Client ready for distributed LLM processing")
             logger.info("Press Ctrl+C to shutdown...")
@@ -446,6 +581,15 @@ class AILoadBalancerClient:
                 logger.info("✅ LLM model server stopped")
             except Exception as e:
                 logger.warning(f"⚠️ Error stopping LLM process: {e}")
+        
+        # Clean up client gRPC server
+        if hasattr(self, 'client_grpc_server') and self.client_grpc_server:
+            try:
+                logger.info("🛑 Stopping client gRPC server...")
+                self.client_grpc_server.stop(0)
+                logger.info("✅ Client gRPC server stopped")
+            except Exception as e:
+                logger.warning(f"⚠️ Error stopping client gRPC server: {e}")
         
         if self._heartbeat_thread:
             self._heartbeat_thread.join(timeout=5)
