@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Simple LLM Server
-A lightweight server that provides agricultural AI responses
+A lightweight server that provides agricultural AI responses using actual LLM models
 """
 
 import os
@@ -17,6 +17,9 @@ class SimpleLLMServer:
     def __init__(self, model_name="simple-agricultural-ai"):
         self.model_name = model_name
         self.model_size = self._get_model_size(model_name)
+        self.model = None
+        self.tokenizer = None
+        self._load_model()
         
     def _get_model_size(self, model_name):
         """Get model size from name"""
@@ -29,30 +32,133 @@ class SimpleLLMServer:
         else:
             return "Simple"
     
-    def generate_response(self, prompt, max_tokens=256, temperature=0.7, top_p=0.9):
-        """Generate agricultural AI response"""
+    def _load_model(self):
+        """Load the actual LLM model"""
         try:
-            logger.info(f"🤖 Generating response for: {prompt[:50]}...")
+            # Try to load transformers and torch
+            import torch
+            from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
             
-            # Simulate processing time based on model size
-            if self.model_size == "1B":
-                time.sleep(1 + random.uniform(0.5, 1.5))  # 1-2.5 seconds
-            elif self.model_size == "3B":
-                time.sleep(2 + random.uniform(1, 3))      # 3-5 seconds
-            elif self.model_size == "8B":
-                time.sleep(4 + random.uniform(2, 4))      # 6-8 seconds
+            logger.info(f"Loading model for {self.model_name}...")
+            
+            # Map model names to actual Hugging Face models
+            model_mapping = {
+                "dhenu2-llama3.2-1b": "meta-llama/Llama-3.2-1B-Instruct",
+                "dhenu2-llama3.2-3b": "meta-llama/Llama-3.2-3B-Instruct", 
+                "dhenu2-llama3.1-8b": "meta-llama/Llama-3.1-8B-Instruct"
+            }
+            
+            # Get the actual model name or use a fallback
+            actual_model = model_mapping.get(self.model_name, "microsoft/DialoGPT-small")
+            
+            logger.info(f"Loading {actual_model}...")
+            
+            # Create a text generation pipeline
+            self.pipeline = pipeline(
+                "text-generation",
+                model=actual_model,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None,
+                max_length=512
+            )
+            
+            logger.info(f"Model {actual_model} loaded successfully")
+            self.model_loaded = True
+            
+        except Exception as e:
+            logger.warning(f"Failed to load actual model: {e}")
+            logger.info("Falling back to simulated responses")
+            self.model_loaded = False
+            self.pipeline = None
+    
+    def generate_response(self, prompt, max_tokens=256, temperature=0.7, top_p=0.9):
+        """Generate agricultural AI response using actual LLM or fallback"""
+        try:
+            logger.info(f"Generating response for: {prompt[:50]}...")
+            
+            if self.model_loaded and self.pipeline:
+                # Use actual LLM model
+                return self._generate_llm_response(prompt, max_tokens, temperature, top_p)
             else:
-                time.sleep(1)
+                # Fallback to simulated responses
+                return self._generate_fallback_response(prompt)
             
-            # Generate contextual agricultural response
-            response = self._generate_agricultural_response(prompt, self.model_size)
+        except Exception as e:
+            logger.error(f"Response generation failed: {e}")
+            return f"I apologize, but I encountered an error while processing your agricultural query: {str(e)}"
+    
+    def _generate_llm_response(self, prompt, max_tokens, temperature, top_p):
+        """Generate response using actual LLM model"""
+        try:
+            # Create a system prompt for agricultural context
+            system_prompt = """You are an expert agricultural advisor specializing in Indian farming practices. 
+            Provide practical, actionable advice for farmers. Focus on sustainable and traditional methods 
+            combined with modern techniques. Keep responses concise and helpful."""
             
-            logger.info(f"✅ Generated response ({len(response)} chars)")
+            # Format the prompt for the model
+            formatted_prompt = f"{system_prompt}\n\nFarmer Question: {prompt}\n\nAdvice:"
+            
+            # Generate response using the pipeline
+            outputs = self.pipeline(
+                formatted_prompt,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+                pad_token_id=self.pipeline.tokenizer.eos_token_id
+            )
+            
+            # Extract the generated text
+            generated_text = outputs[0]['generated_text']
+            
+            # Extract only the response part (after "Advice:")
+            if "Advice:" in generated_text:
+                response = generated_text.split("Advice:")[-1].strip()
+            else:
+                response = generated_text.strip()
+            
+            # Clean up the response
+            response = self._clean_response(response)
+            
+            logger.info(f"Generated LLM response ({len(response)} chars)")
             return response
             
         except Exception as e:
-            logger.error(f"❌ Response generation failed: {e}")
-            return f"I apologize, but I encountered an error while processing your agricultural query: {str(e)}"
+            logger.error(f"LLM generation failed: {e}")
+            return self._generate_fallback_response(prompt)
+    
+    def _clean_response(self, response):
+        """Clean up the generated response"""
+        # Remove any unwanted patterns
+        lines = response.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('Farmer Question:') and not line.startswith('System:'):
+                cleaned_lines.append(line)
+        
+        return ' '.join(cleaned_lines)
+    
+    def _generate_fallback_response(self, prompt):
+        """Generate fallback response when LLM is not available"""
+        logger.info("Using fallback response generation")
+        
+        # Simulate processing time based on model size
+        if self.model_size == "1B":
+            time.sleep(1 + random.uniform(0.5, 1.5))
+        elif self.model_size == "3B":
+            time.sleep(2 + random.uniform(1, 3))
+        elif self.model_size == "8B":
+            time.sleep(4 + random.uniform(2, 4))
+        else:
+            time.sleep(1)
+        
+        # Generate contextual agricultural response
+        response = self._generate_agricultural_response(prompt, self.model_size)
+        
+        logger.info(f"Generated fallback response ({len(response)} chars)")
+        return response
     
     def _generate_agricultural_response(self, prompt, model_size):
         """Generate contextual agricultural response based on prompt and model size"""
@@ -60,18 +166,18 @@ class SimpleLLMServer:
         # Analyze prompt for agricultural context
         prompt_lower = prompt.lower()
         
-        # Base response templates by model size
+        # Base response templates by model size (no emojis)
         if model_size == "1B":
-            prefix = "🌱 Quick Agricultural Advice: "
+            prefix = "Quick Agricultural Advice: "
             style = "concise and practical"
         elif model_size == "3B":
-            prefix = "🌾 Detailed Agricultural Analysis: "
+            prefix = "Detailed Agricultural Analysis: "
             style = "comprehensive and scientific"
         elif model_size == "8B":
-            prefix = "🔬 Expert Agricultural Consultation: "
+            prefix = "Expert Agricultural Consultation: "
             style = "research-level and policy-oriented"
         else:
-            prefix = "🌿 Agricultural Response: "
+            prefix = "Agricultural Response: "
             style = "helpful and informative"
         
         # Context-specific responses
@@ -168,7 +274,7 @@ class SimpleLLMServer:
                 lines=8,
                 label=f"Agricultural AI Response ({self.model_size} Model)"
             ),
-            title=f"🌾 Agricultural AI Assistant ({self.model_size} Model)",
+            title=f"Agricultural AI Assistant ({self.model_size} Model)",
             description=f"Specialized AI for Indian agriculture and farming guidance. Model: {self.model_name}",
             examples=[
                 ["What are the best practices for organic farming?"],
@@ -185,15 +291,15 @@ def main():
     model_name = os.getenv('MODEL_NAME', 'simple-agricultural-ai')
     port = int(os.getenv('GRADIO_PORT', 7861))
     
-    logger.info(f"🌾 Starting Simple Agricultural AI Server")
-    logger.info(f"📝 Model: {model_name}")
-    logger.info(f"🌐 Port: {port}")
+    logger.info(f"Starting Simple Agricultural AI Server")
+    logger.info(f"Model: {model_name}")
+    logger.info(f"Port: {port}")
     
     try:
         server = SimpleLLMServer(model_name)
         interface = server.create_gradio_interface()
         
-        logger.info(f"🚀 Launching on port {port}")
+        logger.info(f"Launching on port {port}")
         interface.launch(
             server_name="0.0.0.0",
             server_port=port,
@@ -202,7 +308,7 @@ def main():
         )
         
     except Exception as e:
-        logger.error(f"❌ Server startup failed: {e}")
+        logger.error(f"Server startup failed: {e}")
         raise
 
 if __name__ == "__main__":
