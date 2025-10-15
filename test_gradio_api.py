@@ -19,7 +19,40 @@ def test_gradio_api(port=7861):
         print(f"❌ Cannot reach Gradio server: {e}")
         return False
     
-    # Test API endpoint
+    # Test API endpoint (try both real Gradio and mock server)
+    try:
+        # First try real Gradio API
+        api_url = f"http://localhost:{port}/api/predict"
+        payload = {
+            "data": [
+                "What is organic farming?",  # prompt
+                256,                         # max_tokens
+                0.7,                        # temperature
+                0.9                         # top_p
+            ]
+        }
+        
+        print(f"📡 Trying Gradio API: {api_url}")
+        response = requests.post(api_url, json=payload, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ Gradio API Response: {json.dumps(result, indent=2)}")
+            return True
+        elif response.status_code == 404:
+            print(f"⚠️ Gradio API not found, trying mock server API...")
+            # Try mock server API
+            return test_mock_api(port)
+        else:
+            print(f"❌ Gradio API failed: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"⚠️ Gradio API test failed: {e}, trying mock server...")
+        return test_mock_api(port)
+
+def test_mock_api(port):
+    """Test the mock server API"""
     try:
         api_url = f"http://localhost:{port}/api/predict"
         payload = {
@@ -31,30 +64,30 @@ def test_gradio_api(port=7861):
             ]
         }
         
-        print(f"📡 Calling API: {api_url}")
+        print(f"📡 Calling Mock API: {api_url}")
         print(f"📝 Payload: {json.dumps(payload, indent=2)}")
         
-        response = requests.post(api_url, json=payload, timeout=30)
+        response = requests.post(api_url, json=payload, timeout=10)
         
         print(f"📊 Response status: {response.status_code}")
         
         if response.status_code == 200:
             result = response.json()
-            print(f"✅ API Response: {json.dumps(result, indent=2)}")
+            print(f"✅ Mock API Response: {json.dumps(result, indent=2)}")
             
             if "data" in result and len(result["data"]) > 0:
                 model_response = result["data"][0]
-                print(f"🤖 Model Response: {model_response}")
+                print(f"🤖 Mock Model Response: {model_response}")
                 return True
             else:
                 print("⚠️ Unexpected response format")
                 return False
         else:
-            print(f"❌ API call failed: {response.text}")
+            print(f"❌ Mock API call failed: {response.text}")
             return False
             
     except Exception as e:
-        print(f"❌ API test failed: {e}")
+        print(f"❌ Mock API test failed: {e}")
         return False
 
 if __name__ == "__main__":

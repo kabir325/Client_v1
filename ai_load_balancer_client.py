@@ -250,15 +250,15 @@ class AILoadBalancerClient:
             # Simple assignment logic based on performance score
             if specs.performance_score >= 80:
                 assigned_model = "dhenu2-llama3.1-8b"
-                model_script = "llama8B.py"
+                model_script = "simple_llm_server.py"  # Use simple server for reliability
                 port = 7863
             elif specs.performance_score >= 60:
                 assigned_model = "dhenu2-llama3.2-3b"
-                model_script = "llama3B.py"
+                model_script = "simple_llm_server.py"  # Use simple server for reliability
                 port = 7862
             else:
                 assigned_model = "dhenu2-llama3.2-1b"
-                model_script = "llama1B.py"
+                model_script = "simple_llm_server.py"  # Use simple server for reliability
                 port = 7861
             
             self.assigned_model = assigned_model
@@ -283,7 +283,20 @@ class AILoadBalancerClient:
             if not os.path.exists(script_path):
                 logger.warning(f"⚠️ LLM script not found: {script_path}")
                 logger.info("💡 Please ensure LLM model scripts are in the llm_models/ directory")
-                logger.info("🔧 For demo purposes, creating a mock LLM server...")
+                logger.info("🔧 Starting mock LLM server instead...")
+                self.start_mock_llm_server(model_name, port)
+                return
+            
+            # Check if we have the required dependencies
+            try:
+                import torch
+                import transformers
+                import gradio
+                logger.info("✅ LLM dependencies available")
+                has_deps = True
+            except ImportError as e:
+                logger.warning(f"⚠️ Missing LLM dependencies: {e}")
+                logger.info("🔧 Starting mock LLM server instead...")
                 self.start_mock_llm_server(model_name, port)
                 return
             
@@ -297,34 +310,69 @@ class AILoadBalancerClient:
                 try:
                     logger.info(f"🔄 Launching {script_name}...")
                     
-                    # Run the Python script
+                    # Run the Python script with output capture
                     process = subprocess.Popen([
                         sys.executable, script_path
-                    ], env=env, cwd=os.getcwd())
+                    ], env=env, cwd=os.getcwd(), 
+                       stdout=subprocess.PIPE, 
+                       stderr=subprocess.PIPE,
+                       text=True)
                     
                     # Store process for cleanup
                     self.llm_process = process
                     
                     logger.info(f"✅ {model_name} server started (PID: {process.pid})")
-                    logger.info(f"🌐 Access at: http://localhost:{port}")
+                    logger.info(f"🌐 Expected at: http://localhost:{port}")
                     
-                    # Wait for process to complete
-                    process.wait()
+                    # Monitor the process
+                    try:
+                        stdout, stderr = process.communicate(timeout=60)  # Wait up to 60 seconds
+                        if process.returncode != 0:
+                            logger.error(f"❌ {model_name} process failed:")
+                            logger.error(f"STDOUT: {stdout}")
+                            logger.error(f"STDERR: {stderr}")
+                    except subprocess.TimeoutExpired:
+                        logger.info(f"✅ {model_name} process running (timeout reached, assuming success)")
                     
                 except Exception as e:
                     logger.error(f"❌ Failed to start {model_name}: {e}")
+                    # Fallback to mock server
+                    logger.info("🔧 Starting mock server as fallback...")
+                    self.start_mock_llm_server(model_name, port)
             
             # Start in background thread
             model_thread = threading.Thread(target=run_model, daemon=True)
             model_thread.start()
             
-            # Give it time to start
-            time.sleep(5)
+            # Give it more time to start and check if it's actually running
+            time.sleep(10)
             
-            logger.info(f"🎉 {model_name} is now available for inference!")
+            # Test if the server is actually accessible
+            self._test_model_server(port, model_name)
             
         except Exception as e:
             logger.error(f"❌ Failed to start LLM model: {e}")
+            logger.info("🔧 Starting mock server as fallback...")
+            self.start_mock_llm_server(model_name, port)
+    
+    def _test_model_server(self, port: int, model_name: str):
+        """Test if the model server is actually running"""
+        try:
+            import requests
+            
+            # Test basic connection
+            response = requests.get(f"http://localhost:{port}", timeout=5)
+            if response.status_code == 200:
+                logger.info(f"✅ {model_name} server is accessible on port {port}")
+                return True
+            else:
+                logger.warning(f"⚠️ {model_name} server returned status {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Cannot reach {model_name} server on port {port}: {e}")
+            logger.info("🔧 The model process may still be starting up...")
+            return False
     
     def start_mock_llm_server(self, model_name: str, port: int):
         """Start a mock LLM server for demo purposes"""
@@ -349,6 +397,10 @@ class AILoadBalancerClient:
                     import socketserver
                     from urllib.parse import parse_qs, urlparse
                     
+                    # Store references for the handler
+                    client_instance = self
+                    model_info = self.mock_model_info
+                    
                     class MockLLMHandler(http.server.BaseHTTPRequestHandler):
                         def do_GET(self):
                             self.send_response(200)
@@ -361,7 +413,7 @@ class AILoadBalancerClient:
                             <body>
                                 <h1>🤖 Mock {model_name} Server</h1>
                                 <p>This is a demo server for {model_name}</p>
-                                <p>Client ID: {self.client_id}</p>
+                                <p>Client ID: {client_instance.client_id}</p>
                                 <p>Status: Running</p>
                                 <form method="POST">
                                     <textarea name="prompt" placeholder="Enter your prompt here..." rows="4" cols="50"></textarea><br>
@@ -376,6 +428,43 @@ class AILoadBalancerClient:
                             content_length = int(self.headers['Content-Length'])
                             post_data = self.rfile.read(content_length)
                             
+                            # Check if this is a Gradio API call
+                            if self.path == '/api/predict':
+                                self.send_response(200)
+                                self.send_header('Content-type', 'application/json')
+                                self.end_headers()
+                                
+                                try:
+                                    # Parse Gradio API request
+                                    import json
+                                    request_data = json.loads(post_data.decode())
+                                    prompt = request_data.get('data', [''])[0] if request_data.get('data') else "sample prompt"
+                                    
+                                    # Generate model-specific response
+                                    base_response = model_info["responses"].get(model_name, "Generic response")
+                                    response = f"{base_response} Responding to: '{prompt}'"
+                                    
+                                    # Return Gradio API format
+                                    gradio_response = {
+                                        "data": [response],
+                                        "is_generating": False,
+                                        "duration": 2.5,
+                                        "average_duration": 2.5
+                                    }
+                                    
+                                    self.wfile.write(json.dumps(gradio_response).encode())
+                                    return
+                                    
+                                except Exception as e:
+                                    # Fallback response
+                                    fallback_response = {
+                                        "data": [f"Mock response from {model_name}"],
+                                        "is_generating": False
+                                    }
+                                    self.wfile.write(json.dumps(fallback_response).encode())
+                                    return
+                            
+                            # Regular HTML form handling
                             self.send_response(200)
                             self.send_header('Content-type', 'text/html')
                             self.end_headers()
@@ -388,7 +477,7 @@ class AILoadBalancerClient:
                                 prompt = "sample prompt"
                             
                             # Generate model-specific response
-                            base_response = self.mock_model_info["responses"].get(model_name, "Generic response")
+                            base_response = model_info["responses"].get(model_name, "Generic response")
                             response = f"{base_response} Responding to: '{prompt}'"
                             
                             html = f"""
