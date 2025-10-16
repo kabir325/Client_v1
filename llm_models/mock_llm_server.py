@@ -213,12 +213,37 @@ def main():
         interface = server.create_gradio_interface()
         
         logger.info(f"Launching on port {port}")
-        interface.launch(
-            server_name="0.0.0.0",
-            server_port=port,
-            share=False,
-            show_error=True
-        )
+        
+        # Try to launch with automatic port finding if the specified port is busy
+        try:
+            interface.launch(
+                server_name="0.0.0.0",
+                server_port=port,
+                share=False,
+                show_error=True
+            )
+        except OSError as e:
+            if "Cannot find empty port" in str(e):
+                logger.warning(f"Port {port} is busy, trying nearby ports...")
+                # Try a few nearby ports
+                for alternative_port in range(port + 1, port + 10):
+                    try:
+                        logger.info(f"Trying alternative port {alternative_port}")
+                        interface.launch(
+                            server_name="0.0.0.0",
+                            server_port=alternative_port,
+                            share=False,
+                            show_error=True
+                        )
+                        logger.info(f"Successfully launched on alternative port {alternative_port}")
+                        break
+                    except OSError:
+                        continue
+                else:
+                    logger.error("Could not find any available port")
+                    raise e
+            else:
+                raise e
         
     except Exception as e:
         logger.error(f"Server startup failed: {e}")
