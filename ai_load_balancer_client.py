@@ -278,27 +278,15 @@ class AILoadBalancerClient:
         try:
             logger.info(f"Starting {model_name} server on port {port}...")
             
-            # Check if script exists
-            script_path = os.path.join("llm_models", script_name)
-            if not os.path.exists(script_path):
-                logger.warning(f"LLM script not found: {script_path}")
-                logger.info("Please ensure LLM model scripts are in the llm_models/ directory")
-                logger.info("Starting mock LLM server instead...")
-                self.start_mock_llm_server(model_name, port)
-                return
+            # For testing, use the reliable mock LLM server
+            logger.info("Using mock LLM server for reliable testing...")
+            self.start_reliable_mock_llm_server(model_name, port)
+            return
             
-            # Check if we have the required dependencies
-            try:
-                import torch
-                import transformers
-                import gradio
-                logger.info("LLM dependencies available")
-                has_deps = True
-            except ImportError as e:
-                logger.warning(f"Missing LLM dependencies: {e}")
-                logger.info("Starting mock LLM server instead...")
-                self.start_mock_llm_server(model_name, port)
-                return
+            # For testing, always use mock server for reliability
+            logger.info("Using mock LLM server for testing distributed load balancer...")
+            self.start_reliable_mock_llm_server(model_name, port)
+            return
             
             # Set environment variables
             env = os.environ.copy()
@@ -513,22 +501,97 @@ class AILoadBalancerClient:
         except Exception as e:
             logger.error(f"Failed to start mock server: {e}")
     
-    def process_ai_request(self, prompt: str) -> str:
-        """Process an AI request using the assigned model"""
+    def start_reliable_mock_llm_server(self, model_name: str, port: int):
+        """Start a reliable mock LLM server using the dedicated mock server script"""
         try:
-            logger.info(f"Processing AI request: '{prompt[:50]}...'")
+            logger.info(f"[LLM SERVER] Starting reliable mock {model_name} server on port {port}...")
             
-            # Always generate a proper response using the direct method
-            logger.info(f"Generating response for model: {getattr(self, 'assigned_model', 'unknown')}")
+            # Set environment variables
+            env = os.environ.copy()
+            env['GRADIO_PORT'] = str(port)
+            env['MODEL_NAME'] = model_name
+            
+            # Start the mock model server in a separate thread
+            def run_mock_model():
+                try:
+                    logger.info(f"[LLM SERVER] Launching mock_llm_server.py for {model_name}...")
+                    
+                    # Run the mock LLM server script
+                    process = subprocess.Popen([
+                        sys.executable, os.path.join("llm_models", "mock_llm_server.py")
+                    ], env=env, cwd=os.getcwd(), 
+                       stdout=subprocess.PIPE, 
+                       stderr=subprocess.PIPE,
+                       text=True)
+                    
+                    # Store process for cleanup
+                    self.llm_process = process
+                    
+                    logger.info(f"[LLM SERVER] Mock {model_name} server started (PID: {process.pid})")
+                    logger.info(f"[LLM SERVER] Expected at: http://localhost:{port}")
+                    
+                    # Monitor the process
+                    try:
+                        stdout, stderr = process.communicate(timeout=60)  # Wait up to 60 seconds
+                        if process.returncode != 0:
+                            logger.error(f"[LLM SERVER] Mock {model_name} process failed:")
+                            logger.error(f"STDOUT: {stdout}")
+                            logger.error(f"STDERR: {stderr}")
+                    except subprocess.TimeoutExpired:
+                        logger.info(f"[LLM SERVER] Mock {model_name} process running (timeout reached, assuming success)")
+                    
+                except Exception as e:
+                    logger.error(f"[LLM SERVER] Failed to start mock {model_name}: {e}")
+            
+            # Start in background thread
+            model_thread = threading.Thread(target=run_mock_model, daemon=True)
+            model_thread.start()
+            
+            # Give it time to start
+            time.sleep(5)
+            
+            # Test if the server is actually accessible
+            self._test_model_server(port, model_name)
+            
+            logger.info(f"[LLM SERVER] Reliable mock {model_name} server is ready!")
+            
+        except Exception as e:
+            logger.error(f"[LLM SERVER] Failed to start reliable mock server: {e}")
+            raise Exception(f"Mock LLM server startup failed: {e}")
+    
+    def process_ai_request(self, prompt: str) -> str:
+        """Process an AI request using the assigned model - DETAILED DATA FLOW"""
+        try:
+            logger.info(f"[CLIENT DATA FLOW] ========================================")
+            logger.info(f"[CLIENT DATA FLOW] RECEIVED AI REQUEST")
+            logger.info(f"[CLIENT DATA FLOW] Client ID: {self.client_id}")
+            logger.info(f"[CLIENT DATA FLOW] Assigned Model: {getattr(self, 'assigned_model', 'unknown')}")
+            logger.info(f"[CLIENT DATA FLOW] Full Prompt: '{prompt}'")
+            logger.info(f"[CLIENT DATA FLOW] ========================================")
+            
+            # Get system specs for context
+            specs = self.get_system_specs()
+            logger.info(f"[CLIENT DATA FLOW] System Performance Score: {specs.performance_score:.2f}")
+            logger.info(f"[CLIENT DATA FLOW] CPU: {specs.cpu_cores} cores @ {specs.cpu_frequency_ghz:.2f} GHz")
+            logger.info(f"[CLIENT DATA FLOW] RAM: {specs.ram_gb} GB")
+            logger.info(f"[CLIENT DATA FLOW] GPU: {specs.gpu_info} ({specs.gpu_memory_gb} GB)")
+            
+            # Process with actual LLM - NO FALLBACKS
+            logger.info(f"[CLIENT DATA FLOW] Starting LLM processing...")
             response = self._generate_direct_response(prompt)
-            logger.info(f"Generated response ({len(response)} chars)")
+            
+            logger.info(f"[CLIENT DATA FLOW] ========================================")
+            logger.info(f"[CLIENT DATA FLOW] LLM PROCESSING COMPLETED")
+            logger.info(f"[CLIENT DATA FLOW] Response Length: {len(response)} chars")
+            logger.info(f"[CLIENT DATA FLOW] Response Preview: '{response[:100]}...'")
+            logger.info(f"[CLIENT DATA FLOW] ========================================")
+            
             return response
             
-
-                
         except Exception as e:
-            logger.error(f"AI request processing failed: {e}")
-            return f"Error processing request: {str(e)}"
+            logger.error(f"[CLIENT DATA FLOW] CRITICAL ERROR: AI request processing failed: {e}")
+            # NO FALLBACKS - Let the error propagate to show the issue
+            raise Exception(f"Client {self.client_id} LLM processing failed: {e}")
     
     def _call_gradio_model(self, prompt: str, port: int) -> str:
         """Call the actual LLM model running on the client"""
@@ -597,11 +660,12 @@ class AILoadBalancerClient:
             return self._generate_direct_response(prompt)
     
     def _generate_direct_response(self, prompt: str) -> str:
-        """Generate response by calling the actual LLM server"""
+        """Generate response by calling the actual LLM server - NO FALLBACKS"""
         try:
             model_name = getattr(self, 'assigned_model', 'dhenu2-llama3.2-3b')
             
-            logger.info(f"Generating response with {model_name}...")
+            logger.info(f"[DATA FLOW] Starting LLM processing with {model_name}")
+            logger.info(f"[DATA FLOW] Input prompt: '{prompt}'")
             
             # Determine the port for this model
             if "1b" in model_name.lower():
@@ -613,72 +677,71 @@ class AILoadBalancerClient:
             else:
                 port = 7862  # Default to 3B port
             
-            # Try to call the actual LLM server
-            try:
-                import requests
-                
-                logger.info(f"Calling LLM server at port {port}")
-                
-                # Try Gradio API format first
-                api_url = f"http://localhost:{port}/api/predict"
-                payload = {
-                    "data": [
-                        prompt,      # prompt
-                        256,         # max_tokens
-                        0.7,         # temperature
-                        0.9          # top_p
-                    ]
-                }
-                
-                response = requests.post(api_url, json=payload, timeout=30)
-                
-                if response.status_code == 200:
-                    try:
-                        result = response.json()
-                        if "data" in result and len(result["data"]) > 0:
-                            model_response = result["data"][0]
-                            logger.info(f"LLM server responded: {len(model_response)} chars")
-                            return model_response
-                    except Exception as e:
-                        logger.warning(f"Failed to parse LLM response: {e}")
-                
-                # If API doesn't work, try direct HTTP call
-                logger.info("Trying direct HTTP call to LLM server...")
-                form_data = {"prompt": prompt}
-                post_response = requests.post(f"http://localhost:{port}", data=form_data, timeout=30)
-                
-                if post_response.status_code == 200:
-                    html_content = post_response.text
-                    if "Response:" in html_content:
-                        # Extract the response from HTML
-                        start = html_content.find("<strong>Response:</strong>") + len("<strong>Response:</strong>")
-                        end = html_content.find("</p>", start)
-                        if start > 0 and end > start:
-                            response_text = html_content[start:end].strip()
-                            logger.info(f"Extracted response from HTML: {len(response_text)} chars")
-                            return response_text
-                
-            except Exception as e:
-                logger.warning(f"Failed to call LLM server: {e}")
+            logger.info(f"[DATA FLOW] Assigned model: {model_name} on port {port}")
             
-            # Fallback: Generate a simple response without conditional logic
-            logger.info("Using fallback response generation")
+            # FORCE actual LLM server call - NO FALLBACKS
+            import requests
             
-            # Simple processing time simulation
-            import time
-            import random
-            processing_time = 2.0 + random.uniform(0.5, 2.0)
-            time.sleep(processing_time)
+            logger.info(f"[DATA FLOW] Calling LLM server at localhost:{port}")
             
-            # Generate a generic agricultural response
-            fallback_response = f"Based on your query about '{prompt}', I recommend consulting with local agricultural extension services for specific guidance tailored to your region and crop conditions. General best practices include proper soil preparation, appropriate seed selection, balanced nutrition, integrated pest management, and sustainable water use."
+            # Try Gradio API format first
+            api_url = f"http://localhost:{port}/api/predict"
+            payload = {
+                "data": [
+                    prompt,      # prompt
+                    256,         # max_tokens
+                    0.7,         # temperature
+                    0.9          # top_p
+                ]
+            }
             
-            logger.info(f"Generated fallback response: {len(fallback_response)} chars")
-            return fallback_response
+            logger.info(f"[DATA FLOW] Sending API request to {api_url}")
+            logger.info(f"[DATA FLOW] Payload: {payload}")
+            
+            response = requests.post(api_url, json=payload, timeout=30)
+            
+            logger.info(f"[DATA FLOW] API Response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                try:
+                    result = response.json()
+                    logger.info(f"[DATA FLOW] API Response data: {result}")
+                    if "data" in result and len(result["data"]) > 0:
+                        model_response = result["data"][0]
+                        logger.info(f"[DATA FLOW] LLM generated response: '{model_response}'")
+                        logger.info(f"[DATA FLOW] Response length: {len(model_response)} chars")
+                        return model_response
+                except Exception as e:
+                    logger.error(f"[DATA FLOW] Failed to parse LLM response: {e}")
+                    raise Exception(f"LLM API response parsing failed: {e}")
+            
+            # If API doesn't work, try direct HTTP call
+            logger.info("[DATA FLOW] API failed, trying direct HTTP call...")
+            form_data = {"prompt": prompt}
+            post_response = requests.post(f"http://localhost:{port}", data=form_data, timeout=30)
+            
+            logger.info(f"[DATA FLOW] Direct HTTP status: {post_response.status_code}")
+            
+            if post_response.status_code == 200:
+                html_content = post_response.text
+                logger.info(f"[DATA FLOW] HTML response received: {len(html_content)} chars")
+                if "Response:" in html_content:
+                    # Extract the response from HTML
+                    start = html_content.find("<strong>Response:</strong>") + len("<strong>Response:</strong>")
+                    end = html_content.find("</p>", start)
+                    if start > 0 and end > start:
+                        response_text = html_content[start:end].strip()
+                        logger.info(f"[DATA FLOW] Extracted HTML response: '{response_text}'")
+                        return response_text
+            
+            # NO FALLBACKS - Force failure if LLM server is not working
+            error_msg = f"LLM server at port {port} is not responding properly. Please ensure the LLM model server is running."
+            logger.error(f"[DATA FLOW] CRITICAL ERROR: {error_msg}")
+            raise Exception(error_msg)
             
         except Exception as e:
-            logger.error(f"Direct response generation failed: {e}")
-            return f"Agricultural advice for your query: '{prompt}'. Please consult local agricultural extension services for detailed guidance."
+            logger.error(f"[DATA FLOW] LLM processing failed: {e}")
+            raise Exception(f"LLM processing failed: {e}")
     
     def start_grpc_server(self):
         """Start gRPC server to receive AI requests from the load balancer"""

@@ -37,36 +37,43 @@ class SimpleLLMServer:
         try:
             # Try to load transformers and torch
             import torch
-            from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+            from transformers import pipeline
             
             logger.info(f"Loading model for {self.model_name}...")
             
-            # Map model names to actual Hugging Face models
-            model_mapping = {
-                "dhenu2-llama3.2-1b": "meta-llama/Llama-3.2-1B-Instruct",
-                "dhenu2-llama3.2-3b": "meta-llama/Llama-3.2-3B-Instruct", 
-                "dhenu2-llama3.1-8b": "meta-llama/Llama-3.1-8B-Instruct"
-            }
-            
-            # Get the actual model name or use a fallback
-            actual_model = model_mapping.get(self.model_name, "microsoft/DialoGPT-small")
-            
-            logger.info(f"Loading {actual_model}...")
-            
-            # Create a text generation pipeline
-            self.pipeline = pipeline(
-                "text-generation",
-                model=actual_model,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else None,
-                max_length=512
-            )
-            
-            logger.info(f"Model {actual_model} loaded successfully")
-            self.model_loaded = True
+            # Use a smaller, readily available model for demonstration
+            # This avoids authentication issues and large downloads
+            try:
+                # Try GPT-2 first (small and readily available)
+                logger.info("Attempting to load GPT-2 small model...")
+                self.pipeline = pipeline(
+                    "text-generation",
+                    model="gpt2",
+                    max_length=256,
+                    pad_token_id=50256
+                )
+                logger.info("GPT-2 model loaded successfully")
+                self.model_loaded = True
+                
+            except Exception as e:
+                logger.warning(f"Failed to load GPT-2: {e}")
+                # Try an even smaller model
+                try:
+                    logger.info("Attempting to load DistilGPT-2...")
+                    self.pipeline = pipeline(
+                        "text-generation",
+                        model="distilgpt2",
+                        max_length=256
+                    )
+                    logger.info("DistilGPT-2 model loaded successfully")
+                    self.model_loaded = True
+                    
+                except Exception as e2:
+                    logger.warning(f"Failed to load DistilGPT-2: {e2}")
+                    raise e2
             
         except Exception as e:
-            logger.warning(f"Failed to load actual model: {e}")
+            logger.warning(f"Failed to load any actual model: {e}")
             logger.info("Falling back to simulated responses")
             self.model_loaded = False
             self.pipeline = None
@@ -90,38 +97,40 @@ class SimpleLLMServer:
     def _generate_llm_response(self, prompt, max_tokens, temperature, top_p):
         """Generate response using actual LLM model"""
         try:
-            # Create a system prompt for agricultural context
-            system_prompt = """You are an expert agricultural advisor specializing in Indian farming practices. 
-            Provide practical, actionable advice for farmers. Focus on sustainable and traditional methods 
-            combined with modern techniques. Keep responses concise and helpful."""
-            
-            # Format the prompt for the model
-            formatted_prompt = f"{system_prompt}\n\nFarmer Question: {prompt}\n\nAdvice:"
+            # Create a focused prompt for agricultural context
+            agricultural_prompt = f"Agricultural advice for: {prompt}\n\nRecommendation:"
             
             # Generate response using the pipeline
             outputs = self.pipeline(
-                formatted_prompt,
-                max_new_tokens=max_tokens,
+                agricultural_prompt,
+                max_length=len(agricultural_prompt.split()) + max_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 do_sample=True,
-                pad_token_id=self.pipeline.tokenizer.eos_token_id
+                num_return_sequences=1,
+                pad_token_id=self.pipeline.tokenizer.eos_token_id if hasattr(self.pipeline.tokenizer, 'eos_token_id') else None
             )
             
             # Extract the generated text
             generated_text = outputs[0]['generated_text']
             
-            # Extract only the response part (after "Advice:")
-            if "Advice:" in generated_text:
-                response = generated_text.split("Advice:")[-1].strip()
+            # Extract only the new part (after the prompt)
+            if "Recommendation:" in generated_text:
+                response = generated_text.split("Recommendation:")[-1].strip()
             else:
-                response = generated_text.strip()
+                # If the format is different, try to extract the relevant part
+                response = generated_text[len(agricultural_prompt):].strip()
             
             # Clean up the response
             response = self._clean_response(response)
             
+            # Ensure we have a reasonable response
+            if len(response) < 20:
+                logger.warning("Generated response too short, using fallback")
+                return self._generate_fallback_response(prompt)
+            
             logger.info(f"Generated LLM response ({len(response)} chars)")
-            return response
+            return f"AI-Generated Agricultural Advice: {response}"
             
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
